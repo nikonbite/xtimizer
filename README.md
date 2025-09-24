@@ -60,4 +60,4 @@ chmod +x uninstall.sh
  - Видео: mp4, mkv, avi, mov, wmv, flv, webm, m4v, mpg, mpeg, 3gp
  - Изображения: jpg, jpeg, png, gif, bmp, tiff, tif, webp
   
-made with ❤️ by @ikonbite
+`made with ❤️ by @nikonbite`
