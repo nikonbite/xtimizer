@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import subprocess
+import argparse
+from pathlib import Path
+
+# Поддерживаемые форматы
+VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp'}
+
+def check_ffmpeg():
+    """Проверяет наличие ffmpeg"""
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("❌ Ошибка: ffmpeg не найден. Установите ffmpeg для работы скрипта.")
+        return False
+
+# ==================== HLS ФУНКЦИИ ====================
+
+def run_hls_ffmpeg_command(input_file, output_dir):
+    """Запускает команду ffmpeg для конвертации видео в HLS"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    cmd = [
+        'ffmpeg', '-nostdin', '-i', str(input_file),
+        '-preset', 'veryfast',
+        '-keyint_min', '50', '-g', '50', '-sc_threshold', '0',
+        '-map', '0:v:0', '-map', '0:a:0?',
+        '-c:v', 'libx264', '-c:a', 'aac',
+        '-b:v:0', '2000k', '-b:a:0', '128k',
+        '-var_stream_map', 'v:0,a:0',
+        '-master_pl_name', 'master.m3u8',
+        '-f', 'hls',
+        '-hls_time', '6',
+        '-hls_list_size', '0',
+        '-hls_segment_filename', f'{output_dir}/segment_%03d.ts',
+        f'{output_dir}/playlist.m3u8'
+    ]
+    
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+def convert_video_to_hls(input_file, delete_original=False):
+    """Конвертирует одно видео в HLS формат"""
+    input_path = Path(input_file)
+    output_dir_name = input_path.stem
+    output_dir = input_path.parent / output_dir_name
+    
+    print(f"Конвертируем: {input_file}")
+    print(f"Выходная директория: {output_dir}")
+    
+    try:
+        result = run_hls_ffmpeg_command(input_path, output_dir)
+        
+        if result.returncode == 0:
+            print(f"✅ Успешно конвертировано: {input_file}")
+            
+            if delete_original:
+                os.remove(input_file)
+                print(f"🗑️  Исходный файл удален: {input_file}")
+        else:
+            print(f"❌ Ошибка при конвертации {input_file}:")
+            print(f"Stderr: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка при обработке {input_file}: {str(e)}")
+        return False
+        
+    return True
+
+def find_video_files(directory):
+    """Находит все видео файлы в директории рекурсивно"""
+    video_files = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if Path(file).suffix.lower() in VIDEO_EXTENSIONS:
+                video_files.append(os.path.join(root, file))
+    return video_files
+
+# ==================== IMAGES ФУНКЦИИ ====================
+
+def run_image_ffmpeg_command(input_file, output_file):
+    """Запускает команду ffmpeg для оптимизации изображения"""
+    cmd = [
+        'ffmpeg', '-nostdin', '-y',
+        '-i', str(input_file),
+        '-vf', 'scale=iw:ih',
+        '-c:v', 'libwebp',
+        '-quality', '85',
+        '-compression_level', '6',
+        '-preset', 'default',
+        '-loop', '0',
+        str(output_file)
+    ]
+    
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+def optimize_image(input_file, delete_original=False):
+    """Оптимизирует одно изображение"""
+    input_path = Path(input_file)
+    output_path = input_path.with_suffix('.webp')
+    
+    if input_path.suffix.lower() == '.webp':
+        temp_path = input_path.with_suffix('.webp.tmp')
+        actual_output = temp_path
+    else:
+        actual_output = output_path
+    
+    print(f"Оптимизируем: {input_file}")
+    
+    try:
+        original_size = os.path.getsize(input_file)
+        result = run_image_ffmpeg_command(input_path, actual_output)
+        
+        if result.returncode == 0:
+            new_size = os.path.getsize(actual_output)
+            
+            if input_path.suffix.lower() == '.webp':
+                os.replace(actual_output, input_path)
+                final_path = input_path
+            else:
+                final_path = actual_output
+                
+            size_saved = original_size - new_size
+            percent_saved = (size_saved / original_size) * 100 if original_size > 0 else 0
+            
+            print(f"✅ Успешно оптимизировано: {final_path}")
+            print(f"📊 Размер: {original_size} байт → {new_size} байт "
+                  f"(экономия: {size_saved} байт, {percent_saved:.1f}%)")
+            
+            if delete_original and input_path.suffix.lower() != '.webp':
+                os.remove(input_file)
+                print(f"🗑️  Исходный файл удален: {input_file}")
+        else:
+            print(f"❌ Ошибка при оптимизации {input_file}:")
+            print(f"Stderr: {result.stderr}")
+            
+            if actual_output.exists():
+                os.remove(actual_output)
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка при обработке {input_file}: {str(e)}")
+        try:
+            if actual_output.exists():
+                os.remove(actual_output)
+        except:
+            pass
+        return False
+        
+    return True
+
+def find_image_files(directory):
+    """Находит все изображения в директории рекурсивно"""
+    image_files = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if Path(file).suffix.lower() in IMAGE_EXTENSIONS:
+                image_files.append(os.path.join(root, file))
+    return image_files
+
+def format_size(size_bytes):
+    """Форматирует размер в байтах в удобочитаемый вид"""
+    if size_bytes == 0:
+        return "0 B"
+    
+    size_names = ["B", "KB", "MB", "GB"]
+    i = 0
+    size = float(size_bytes)
+    
+    while size >= 1024.0 and i < len(size_names) - 1:
+        size /= 1024.0
+        i += 1
+    
+    return f"{size:.1f} {size_names[i]}"
+
+# ==================== ГЛАВНЫЕ ФУНКЦИИ ====================
+
+def process_hls(args):
+    """Обрабатывает команду hls"""
+    if not check_ffmpeg():
+        sys.exit(1)
+    
+    path = Path(args.path)
+    
+    if not path.exists():
+        print(f"❌ Ошибка: Путь {args.path} не существует")
+        sys.exit(1)
+    
+    video_files = []
+    
+    if path.is_file():
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            video_files = [str(path)]
+        else:
+            print(f"❌ Файл {path} не является поддерживаемым видео форматом")
+            print(f"Поддерживаемые форматы: {', '.join(sorted(VIDEO_EXTENSIONS))}")
+            sys.exit(1)
+    else:
+        video_files = find_video_files(str(path))
+        
+        if not video_files:
+            print(f"📁 Видео файлы не найдены в {args.path}")
+            print(f"Поддерживаемые форматы: {', '.join(sorted(VIDEO_EXTENSIONS))}")
+            sys.exit(0)
+    
+    print(f"🎬 Найдено видео файлов: {len(video_files)}")
+    
+    success_count = 0
+    for video_file in video_files:
+        if convert_video_to_hls(video_file, args.delete):
+            success_count += 1
+        print("-" * 50)
+    
+    print(f"\n✨ Готово! Успешно обработано: {success_count}/{len(video_files)} файлов")
+
+def process_pictures(args):
+    """Обрабатывает команду pictures"""
+    if not check_ffmpeg():
+        sys.exit(1)
+    
+    path = Path(args.path)
+    
+    if not path.exists():
+        print(f"❌ Ошибка: Путь {args.path} не существует")
+        sys.exit(1)
+    
+    image_files = []
+    
+    if path.is_file():
+        if path.suffix.lower() in IMAGE_EXTENSIONS:
+            image_files = [str(path)]
+        else:
+            print(f"❌ Файл {path} не является поддерживаемым форматом изображения")
+            print(f"Поддерживаемые форматы: {', '.join(sorted(IMAGE_EXTENSIONS))}")
+            sys.exit(1)
+    else:
+        image_files = find_image_files(str(path))
+        
+        if not image_files:
+            print(f"🖼️  Изображения не найдены в {args.path}")
+            print(f"Поддерживаемые форматы: {', '.join(sorted(IMAGE_EXTENSIONS))}")
+            sys.exit(0)
+    
+    print(f"🖼️  Найдено изображений: {len(image_files)}")
+    
+    total_original_size = sum(os.path.getsize(f) for f in image_files if os.path.exists(f))
+    
+    success_count = 0
+    total_optimized_size = 0
+    
+    for image_file in image_files:
+        if optimize_image(image_file, args.delete):
+            success_count += 1
+            output_path = Path(image_file).with_suffix('.webp')
+            if output_path.exists():
+                total_optimized_size += os.path.getsize(output_path)
+            elif os.path.exists(image_file):
+                total_optimized_size += os.path.getsize(image_file)
+        print("-" * 50)
+    
+    total_saved = total_original_size - total_optimized_size
+    percent_saved = (total_saved / total_original_size * 100) if total_original_size > 0 else 0
+    
+    print(f"\n✨ Готово! Успешно обработано: {success_count}/{len(image_files)} файлов")
+    print(f"📊 Общая экономия места: {format_size(total_saved)} ({percent_saved:.1f}%)")
+    print(f"📊 Было: {format_size(total_original_size)} → Стало: {format_size(total_optimized_size)}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='🚀 XTimizer - Универсальный оптимизатор медиафайлов',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+  xtimizer hls                       # Конвертировать все видео в текущей директории в HLS
+  xtimizer hls /path/to/videos       # Конвертировать видео из указанной директории  
+  xtimizer hls video.mp4 --delete    # Конвертировать один файл с удалением исходника
+  
+  xtimizer pictures                  # Оптимизировать все изображения в текущей директории
+  xtimizer pictures /path/to/images  # Оптимизировать изображения из указанной директории
+  xtimizer pictures image.jpg -d     # Оптимизировать один файл с удалением исходника
+
+Поддерживаемые форматы:
+  Видео: mp4, mkv, avi, mov, wmv, flv, webm, m4v, mpg, mpeg, 3gp
+  Изображения: jpg, jpeg, png, gif, bmp, tiff, tif, webp
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='Доступные команды')
+    
+    # Парсер для HLS
+    hls_parser = subparsers.add_parser('hls', help='Конвертировать видео в HLS формат')
+    hls_parser.add_argument('path', nargs='?', default='.', 
+                           help='Путь к файлу или директории (по умолчанию: текущая директория)')
+    hls_parser.add_argument('-d', '--delete', action='store_true',
+                           help='Удалить исходные файлы после успешной конвертации')
+    
+    # Парсер для изображений
+    pictures_parser = subparsers.add_parser('pictures', help='Оптимизировать изображения в WebP')
+    pictures_parser.add_argument('path', nargs='?', default='.', 
+                                help='Путь к файлу или директории (по умолчанию: текущая директория)')
+    pictures_parser.add_argument('-d', '--delete', action='store_true',
+                                help='Удалить исходные файлы после успешной оптимизации')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+    
+    if args.command == 'hls':
+        process_hls(args)
+    elif args.command == 'pictures':
+        process_pictures(args)
+
+if __name__ == '__main__':
+    main()
